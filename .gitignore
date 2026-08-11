@@ -36,3 +36,6 @@ Thumbs.db
 
 # Misc
 *.local
+
+# Local-only project notes (not committed)
+notes.md
