@@ -13,3 +13,175 @@ datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
 }
+
+enum PipelineRunStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+  STOPPED
+}
+
+enum ArticleStatus {
+  DISCOVERED
+  CRAWLED
+  EXTRACTED
+  FAILED
+}
+
+enum AuthorExtractionMethod {
+  JSON_LD
+  META_TAG
+  BYLINE_PATTERN
+  AUTHOR_BIO_PAGE
+  STAFF_PAGE
+  NONE
+}
+
+enum ContactAttemptMethod {
+  CONTACT_PAGE_SCAN
+  EMAIL_PATTERN_GUESS
+  OUTLET_FALLBACK
+  MANUAL
+}
+
+enum ContactAttemptStatus {
+  FOUND
+  OUTLET_FALLBACK
+  NEEDS_REVIEW
+  FAILED
+}
+
+enum EmailThreadStatus {
+  DRAFT
+  PENDING_APPROVAL
+  SENT
+  REPLIED
+  CLOSED
+}
+
+enum MessageDirection {
+  OUTBOUND
+  INBOUND
+}
+
+model PipelineRun {
+  id          String            @id @default(cuid())
+  topic       String
+  maxArticles Int
+  maxDrafts   Int
+  maxSends    Int
+  status      PipelineRunStatus @default(PENDING)
+  startedAt   DateTime?
+  completedAt DateTime?
+  createdAt   DateTime          @default(now())
+
+  articles Article[]
+
+  @@index([status])
+}
+
+model Article {
+  id            String        @id @default(cuid())
+  pipelineRunId String
+  url           String        @unique
+  title         String
+  sourceDomain  String
+  status        ArticleStatus @default(DISCOVERED)
+  discoveredAt  DateTime
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  pipelineRun  PipelineRun   @relation(fields: [pipelineRunId], references: [id], onDelete: Cascade)
+  author       Author?
+  emailThreads EmailThread[]
+
+  @@index([pipelineRunId])
+  @@index([sourceDomain])
+}
+
+model Author {
+  id               String                 @id @default(cuid())
+  articleId        String                 @unique
+  name             String?
+  extractionMethod AuthorExtractionMethod
+  confidence       Float
+  profileUrl       String?
+  createdAt        DateTime               @default(now())
+
+  article         Article          @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  contactAttempts ContactAttempt[]
+  emailThreads    EmailThread[]
+
+  @@index([extractionMethod])
+}
+
+model ContactAttempt {
+  id             String               @id @default(cuid())
+  authorId       String
+  method         ContactAttemptMethod
+  emailCandidate String?
+  confidence     Float
+  status         ContactAttemptStatus
+  createdAt      DateTime             @default(now())
+
+  author       Author        @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  emailThreads EmailThread[]
+
+  @@index([authorId])
+  @@index([status])
+}
+
+model EmailThread {
+  id               String            @id @default(cuid())
+  articleId        String
+  authorId         String
+  contactAttemptId String?
+  recipientEmail   String
+  subject          String
+  status           EmailThreadStatus @default(DRAFT)
+  createdAt        DateTime          @default(now())
+  updatedAt        DateTime          @updatedAt
+
+  article        Article         @relation(fields: [articleId], references: [id], onDelete: Cascade)
+  author         Author          @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  contactAttempt ContactAttempt? @relation(fields: [contactAttemptId], references: [id], onDelete: Cascade)
+  messages       Message[]
+
+  @@index([articleId])
+  @@index([authorId])
+  @@index([contactAttemptId])
+  @@index([status])
+}
+
+model Message {
+  id             String           @id @default(cuid())
+  threadId       String
+  direction      MessageDirection
+  aiGenerated    Boolean
+  approvedByUser Boolean          @default(false)
+  body           String           @db.Text
+  sentAt         DateTime?
+  createdAt      DateTime         @default(now())
+
+  thread EmailThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
+
+  @@index([threadId])
+}
+
+model Setting {
+  id                Int     @id @default(1)
+  automationEnabled Boolean @default(false)
+  searchTopic       String  @default("outdoor/hunting/shooting sports retail")
+  maxArticlesPerRun Int     @default(10)
+  maxDraftsPerRun   Int     @default(10)
+  maxSendsPerRun    Int     @default(5)
+  dailySendCap      Int     @default(10)
+}
+
+model WhitelistEntry {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  label     String?
+  createdAt DateTime @default(now())
+}
