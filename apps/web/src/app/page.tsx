@@ -5,6 +5,7 @@ import type { ArticleDTO, PipelineRunDTO, PipelineRunStatus, SettingDTO } from "
 import {
   crawlPipelineRun,
   createPipelineRun,
+  extractAuthors,
   getSettings,
   listPipelineRuns,
   updateSettings,
@@ -70,6 +71,18 @@ function ArticleList({ articles }: { articles: ArticleDTO[] }) {
               Crawl failed: {article.crawlError}
             </div>
           )}
+          {article.author && (
+            <div className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+              {article.author.extractionMethod === "NONE" ? (
+                "No author found"
+              ) : (
+                <>
+                  Author: {article.author.name} ({article.author.extractionMethod}, confidence{" "}
+                  {article.author.confidence.toFixed(2)})
+                </>
+              )}
+            </div>
+          )}
         </li>
       ))}
     </ul>
@@ -88,6 +101,8 @@ export default function Home() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [crawling, setCrawling] = useState(false);
   const [crawlError, setCrawlError] = useState<string | null>(null);
+  const [extracting, setExtracting] = useState(false);
+  const [extractError, setExtractError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -162,10 +177,27 @@ export default function Home() {
     }
   }
 
+  async function handleExtractAuthors() {
+    if (!selectedRun) return;
+
+    setExtracting(true);
+    setExtractError(null);
+    try {
+      const updated = await extractAuthors(selectedRun.id);
+      setRuns((prev) => prev.map((run) => (run.id === updated.id ? updated : run)));
+    } catch (error) {
+      setExtractError(error instanceof Error ? error.message : "Failed to extract authors.");
+    } finally {
+      setExtracting(false);
+    }
+  }
+
   const selectedRun = runs.find((run) => run.id === selectedRunId) ?? runs[0] ?? null;
   const maxAllowed = settings?.maxArticlesPerRun ?? 1;
   const discoveredCount =
     selectedRun?.articles.filter((article) => article.status === "DISCOVERED").length ?? 0;
+  const crawledCount =
+    selectedRun?.articles.filter((article) => article.status === "CRAWLED").length ?? 0;
 
   return (
     <div className="mx-auto flex min-h-screen max-w-3xl flex-col gap-8 bg-zinc-50 px-6 py-10 dark:bg-black">
@@ -295,6 +327,26 @@ export default function Home() {
           {crawlError && (
             <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
               {crawlError}
+            </p>
+          )}
+          <div className="mb-3 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleExtractAuthors}
+              disabled={crawledCount === 0 || extracting}
+              className="rounded border border-zinc-300 px-3 py-1 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+            >
+              {extracting ? "Extracting…" : "Extract Authors"}
+            </button>
+            {crawledCount === 0 && (
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                No crawled articles left to extract authors from.
+              </span>
+            )}
+          </div>
+          {extractError && (
+            <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+              {extractError}
             </p>
           )}
           <ArticleList articles={selectedRun.articles} />

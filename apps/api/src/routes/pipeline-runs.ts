@@ -3,10 +3,21 @@ import type { CreatePipelineRunRequest } from "@eagleeye/types";
 import { prisma } from "../lib/prisma.js";
 import { SearchService, SearchServiceError } from "../services/search.js";
 import { crawlerService } from "../services/crawler.js";
+import { extractAuthor } from "../services/author-extractor.js";
+
+const authorSelect = {
+  id: true,
+  articleId: true,
+  name: true,
+  extractionMethod: true,
+  confidence: true,
+  profileUrl: true,
+  createdAt: true,
+} as const;
 
 // Excludes `rawHtml` from every API response — the dashboard only ever
-// displays status/crawlError, and there's no reason to ship potentially
-// large HTML blobs over the wire for a value nothing renders.
+// displays status/crawlError/author fields, and there's no reason to ship
+// potentially large HTML blobs over the wire for a value nothing renders.
 const articleSelect = {
   id: true,
   pipelineRunId: true,
@@ -20,6 +31,7 @@ const articleSelect = {
   discoveredAt: true,
   createdAt: true,
   updatedAt: true,
+  author: { select: authorSelect },
 } as const;
 
 export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
@@ -176,6 +188,59 @@ export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
 
     return updated;
   });
+
+  // No automation gate here, unlike /pipeline-runs and .../crawl above:
+  // extraction is pure structural parsing over Article.rawHtml already
+  // fetched by Day 4's crawl — no external calls, no third-party load, no
+  // cost. The automation toggle exists specifically to prevent unattended
+  // spend/third-party traffic, neither of which applies to this step.
+  app.post<{ Params: { id: string } }>(
+    "/pipeline-runs/:id/extract-authors",
+    async (request, reply) => {
+      const run = await prisma.pipelineRun.findUnique({
+        where: { id: request.params.id },
+        select: { id: true },
+      });
+
+      if (!run) {
+        return reply.code(404).send({ error: "Pipeline run not found" });
+      }
+
+      // Fetched separately (not via articleSelect) so rawHtml never ends up
+      // on a response object elsewhere in this route — same convention as
+      // the crawler route excluding it from every returned Article shape.
+      const pending = await prisma.article.findMany({
+        where: { pipelineRunId: run.id, status: "CRAWLED", author: null },
+        select: { id: true, url: true, rawHtml: true },
+      });
+
+      for (const article of pending) {
+        // CRAWLED articles always have rawHtml set by the crawler; the ""
+        // fallback is just a defensive guard, and would itself simply
+        // extract to a NONE result rather than throwing.
+        const extraction = extractAuthor(article.rawHtml ?? "", article.url);
+
+        await prisma.author.create({
+          data: {
+            articleId: article.id,
+            name: extraction.name,
+            extractionMethod: extraction.method,
+            confidence: extraction.confidence,
+            profileUrl: extraction.profileUrl,
+          },
+        });
+
+        await prisma.article.update({ where: { id: article.id }, data: { status: "EXTRACTED" } });
+      }
+
+      const updated = await prisma.pipelineRun.findUnique({
+        where: { id: run.id },
+        include: { articles: { select: articleSelect } },
+      });
+
+      return updated;
+    },
+  );
 }
 
 function failRun(runId: string) {

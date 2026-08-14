@@ -15,12 +15,14 @@
     "@eagleeye/types": "workspace:*",
     "@fastify/cors": "^11.3.0",
     "@prisma/client": "^6.3.1",
+    "cheerio": "^1.2.0",
     "dotenv": "^16.6.1",
     "fastify": "^5.2.1",
     "robots-parser": "^3.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.10",
+    "domhandler": "^5.0.3",
     "playwright": "^1.62.1",
     "prisma": "^6.3.1",
     "tsx": "^4.19.2",

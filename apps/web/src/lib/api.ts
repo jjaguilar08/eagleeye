@@ -53,3 +53,7 @@ export function createPipelineRun(body: CreatePipelineRunRequest): Promise<Pipel
 export function crawlPipelineRun(id: string): Promise<PipelineRunDTO> {
   return apiFetch<PipelineRunDTO>(`/pipeline-runs/${id}/crawl`, { method: "POST" });
 }
+
+export function extractAuthors(id: string): Promise<PipelineRunDTO> {
+  return apiFetch<PipelineRunDTO>(`/pipeline-runs/${id}/extract-authors`, { method: "POST" });
+}

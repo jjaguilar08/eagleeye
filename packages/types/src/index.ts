@@ -25,6 +25,19 @@ export interface UpdateSettingRequest {
 export type PipelineRunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "STOPPED";
 export type ArticleStatus = "DISCOVERED" | "CRAWLED" | "EXTRACTED" | "FAILED";
 
+export type AuthorExtractionMethod =
+  "JSON_LD" | "META_TAG" | "BYLINE_PATTERN" | "AUTHOR_BIO_PAGE" | "STAFF_PAGE" | "NONE";
+
+export interface AuthorDTO {
+  id: string;
+  articleId: string;
+  name: string | null;
+  extractionMethod: AuthorExtractionMethod;
+  confidence: number;
+  profileUrl: string | null;
+  createdAt: string;
+}
+
 export interface ArticleDTO {
   id: string;
   pipelineRunId: string;
@@ -41,6 +54,10 @@ export interface ArticleDTO {
   discoveredAt: string;
   createdAt: string;
   updatedAt: string;
+  // Null until extraction has been attempted. Once attempted, this is always
+  // set (status becomes EXTRACTED either way) — even when no author was
+  // found, extractionMethod: "NONE" records that the attempt happened.
+  author: AuthorDTO | null;
 }
 
 export interface PipelineRunDTO {
