@@ -2,6 +2,25 @@ import type { FastifyInstance } from "fastify";
 import type { CreatePipelineRunRequest } from "@eagleeye/types";
 import { prisma } from "../lib/prisma.js";
 import { SearchService, SearchServiceError } from "../services/search.js";
+import { crawlerService } from "../services/crawler.js";
+
+// Excludes `rawHtml` from every API response — the dashboard only ever
+// displays status/crawlError, and there's no reason to ship potentially
+// large HTML blobs over the wire for a value nothing renders.
+const articleSelect = {
+  id: true,
+  pipelineRunId: true,
+  url: true,
+  title: true,
+  sourceDomain: true,
+  sourceName: true,
+  publishedAt: true,
+  status: true,
+  crawlError: true,
+  discoveredAt: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
 
 export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: CreatePipelineRunRequest }>("/pipeline-runs", async (request, reply) => {
@@ -78,7 +97,7 @@ export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
       const completed = await prisma.pipelineRun.update({
         where: { id: run.id },
         data: { status: "COMPLETED", completedAt: new Date() },
-        include: { articles: true },
+        include: { articles: { select: articleSelect } },
       });
 
       return reply.code(201).send(completed);
@@ -93,14 +112,14 @@ export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
   app.get("/pipeline-runs", async () => {
     return prisma.pipelineRun.findMany({
       orderBy: { createdAt: "desc" },
-      include: { articles: true },
+      include: { articles: { select: articleSelect } },
     });
   });
 
   app.get<{ Params: { id: string } }>("/pipeline-runs/:id", async (request, reply) => {
     const run = await prisma.pipelineRun.findUnique({
       where: { id: request.params.id },
-      include: { articles: true },
+      include: { articles: { select: articleSelect } },
     });
 
     if (!run) {
@@ -109,12 +128,60 @@ export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
 
     return run;
   });
+
+  app.post<{ Params: { id: string } }>("/pipeline-runs/:id/crawl", async (request, reply) => {
+    const settings = await prisma.setting.upsert({
+      where: { id: 1 },
+      update: {},
+      create: { id: 1 },
+    });
+
+    if (!settings.automationEnabled) {
+      return reply
+        .code(403)
+        .send({ error: "Automation is disabled. Enable it in Settings before crawling." });
+    }
+
+    const run = await prisma.pipelineRun.findUnique({
+      where: { id: request.params.id },
+      include: { articles: { select: articleSelect } },
+    });
+
+    if (!run) {
+      return reply.code(404).send({ error: "Pipeline run not found" });
+    }
+
+    const discovered = run.articles.filter((article) => article.status === "DISCOVERED");
+
+    // Sequential, not concurrent — there's no job queue yet (Day 7), and the
+    // per-domain rate limiter already serializes same-domain requests
+    // anyway, so concurrency would only help articles on different domains
+    // at the cost of complexity this day doesn't need.
+    for (const article of discovered) {
+      const result = await crawlerService.crawlArticle(article.url);
+
+      await prisma.article.update({
+        where: { id: article.id },
+        data:
+          result.status === "CRAWLED"
+            ? { status: "CRAWLED", rawHtml: result.rawHtml, crawlError: null }
+            : { status: "FAILED", crawlError: result.crawlError },
+      });
+    }
+
+    const updated = await prisma.pipelineRun.findUnique({
+      where: { id: run.id },
+      include: { articles: { select: articleSelect } },
+    });
+
+    return updated;
+  });
 }
 
 function failRun(runId: string) {
   return prisma.pipelineRun.update({
     where: { id: runId },
     data: { status: "FAILED", completedAt: new Date() },
-    include: { articles: true },
+    include: { articles: { select: articleSelect } },
   });
 }

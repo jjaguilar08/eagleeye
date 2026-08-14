@@ -98,6 +98,13 @@ model Article {
   // found it).
   publishedAt   DateTime?
   status        ArticleStatus @default(DISCOVERED)
+  // Fetched page HTML, stored directly in Postgres — simpler than external/file
+  // storage at this project's scale. Only set on a successful crawl.
+  rawHtml       String?       @db.Text
+  // Short machine reason a crawl failed (e.g. "robots_disallowed", "timeout",
+  // "http_404", "http_5xx"). Distinct from PipelineRun's transient `error`
+  // stopgap field — this is per-article and persisted.
+  crawlError    String?
   discoveredAt  DateTime
   createdAt     DateTime      @default(now())
   updatedAt     DateTime      @updatedAt

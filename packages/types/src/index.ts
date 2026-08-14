@@ -34,6 +34,10 @@ export interface ArticleDTO {
   sourceName: string | null;
   publishedAt: string | null;
   status: ArticleStatus;
+  // Deliberately omitted here: rawHtml. The dashboard only ever needs
+  // status/crawlError to review a crawl — raw HTML isn't rendered anywhere,
+  // so it's left off the wire type entirely rather than sent and ignored.
+  crawlError: string | null;
   discoveredAt: string;
   createdAt: string;
   updatedAt: string;

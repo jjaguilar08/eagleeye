@@ -2,7 +2,13 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import type { ArticleDTO, PipelineRunDTO, PipelineRunStatus, SettingDTO } from "@eagleeye/types";
-import { createPipelineRun, getSettings, listPipelineRuns, updateSettings } from "@/lib/api";
+import {
+  crawlPipelineRun,
+  createPipelineRun,
+  getSettings,
+  listPipelineRuns,
+  updateSettings,
+} from "@/lib/api";
 
 const RUN_STATUS_STYLES: Record<PipelineRunStatus, string> = {
   PENDING: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
@@ -20,6 +26,21 @@ function StatusBadge({ status }: { status: PipelineRunStatus }) {
   );
 }
 
+const ARTICLE_STATUS_STYLES: Record<ArticleDTO["status"], string> = {
+  DISCOVERED: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
+  CRAWLED: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200",
+  EXTRACTED: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200",
+  FAILED: "bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200",
+};
+
+function ArticleStatusBadge({ status }: { status: ArticleDTO["status"] }) {
+  return (
+    <span className={`rounded px-2 py-0.5 text-xs font-medium ${ARTICLE_STATUS_STYLES[status]}`}>
+      {status}
+    </span>
+  );
+}
+
 function ArticleList({ articles }: { articles: ArticleDTO[] }) {
   if (articles.length === 0) {
     return <p className="text-sm text-zinc-500 dark:text-zinc-400">No articles discovered.</p>;
@@ -29,19 +50,26 @@ function ArticleList({ articles }: { articles: ArticleDTO[] }) {
     <ul className="divide-y divide-zinc-200 dark:divide-zinc-800">
       {articles.map((article) => (
         <li key={article.id} className="py-2">
-          <a
-            href={article.url}
-            target="_blank"
-            rel="noreferrer"
-            className="font-medium text-blue-700 hover:underline dark:text-blue-400"
-          >
-            {article.title}
-          </a>
+          <div className="flex items-start justify-between gap-3">
+            <a
+              href={article.url}
+              target="_blank"
+              rel="noreferrer"
+              className="font-medium text-blue-700 hover:underline dark:text-blue-400"
+            >
+              {article.title}
+            </a>
+            <ArticleStatusBadge status={article.status} />
+          </div>
           <div className="text-xs text-zinc-500 dark:text-zinc-400">
             {article.sourceName ?? article.sourceDomain}
-            {article.publishedAt &&
-              ` · ${new Date(article.publishedAt).toLocaleDateString()}`} · {article.status}
+            {article.publishedAt && ` · ${new Date(article.publishedAt).toLocaleDateString()}`}
           </div>
+          {article.status === "FAILED" && article.crawlError && (
+            <div className="mt-1 text-xs text-red-700 dark:text-red-400">
+              Crawl failed: {article.crawlError}
+            </div>
+          )}
         </li>
       ))}
     </ul>
@@ -58,6 +86,8 @@ export default function Home() {
   const [togglePending, setTogglePending] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [crawling, setCrawling] = useState(false);
+  const [crawlError, setCrawlError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -117,8 +147,25 @@ export default function Home() {
     }
   }
 
+  async function handleCrawl() {
+    if (!selectedRun || !settings?.automationEnabled) return;
+
+    setCrawling(true);
+    setCrawlError(null);
+    try {
+      const updated = await crawlPipelineRun(selectedRun.id);
+      setRuns((prev) => prev.map((run) => (run.id === updated.id ? updated : run)));
+    } catch (error) {
+      setCrawlError(error instanceof Error ? error.message : "Failed to crawl articles.");
+    } finally {
+      setCrawling(false);
+    }
+  }
+
   const selectedRun = runs.find((run) => run.id === selectedRunId) ?? runs[0] ?? null;
   const maxAllowed = settings?.maxArticlesPerRun ?? 1;
+  const discoveredCount =
+    selectedRun?.articles.filter((article) => article.status === "DISCOVERED").length ?? 0;
 
   return (
     <div className="mx-auto flex min-h-screen max-w-3xl flex-col gap-8 bg-zinc-50 px-6 py-10 dark:bg-black">
@@ -222,6 +269,32 @@ export default function Home() {
           {selectedRun.error && (
             <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
               {selectedRun.error}
+            </p>
+          )}
+          <div className="mb-3 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleCrawl}
+              disabled={!settings?.automationEnabled || discoveredCount === 0 || crawling}
+              className="rounded border border-zinc-300 px-3 py-1 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+            >
+              {crawling ? "Crawling…" : "Crawl Articles"}
+            </button>
+            {!settings?.automationEnabled ? (
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                Automation is off — turn it on above to crawl articles.
+              </span>
+            ) : (
+              discoveredCount === 0 && (
+                <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                  No discovered articles left to crawl.
+                </span>
+              )
+            )}
+          </div>
+          {crawlError && (
+            <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+              {crawlError}
             </p>
           )}
           <ArticleList articles={selectedRun.articles} />

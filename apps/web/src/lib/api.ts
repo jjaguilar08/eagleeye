@@ -14,7 +14,11 @@ interface ApiErrorBody {
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
-    headers: { "Content-Type": "application/json", ...init?.headers },
+    // Only set Content-Type when there's a body — Fastify's JSON body
+    // parser rejects an empty body sent with 'application/json'
+    // (FST_ERR_CTP_EMPTY_JSON_BODY), which bodyless POSTs like the crawl
+    // endpoint would otherwise hit.
+    headers: { ...(init?.body ? { "Content-Type": "application/json" } : {}), ...init?.headers },
   });
 
   const body: unknown = await response.json();
@@ -44,4 +48,8 @@ export function listPipelineRuns(): Promise<PipelineRunDTO[]> {
 
 export function createPipelineRun(body: CreatePipelineRunRequest): Promise<PipelineRunDTO> {
   return apiFetch<PipelineRunDTO>("/pipeline-runs", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function crawlPipelineRun(id: string): Promise<PipelineRunDTO> {
+  return apiFetch<PipelineRunDTO>(`/pipeline-runs/${id}/crawl`, { method: "POST" });
 }

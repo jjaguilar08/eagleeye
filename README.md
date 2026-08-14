@@ -47,8 +47,14 @@ cd eagleeye
 pnpm install
 cp .env.example .env
 docker compose up -d
+pnpm --filter @eagleeye/api exec playwright install chromium
 pnpm dev
 ```
+
+The Playwright install step downloads a headless Chromium build used by
+`apps/api`'s crawler service as a fallback for pages that render as an empty
+shell without JavaScript (client-rendered SPAs). Only the Chromium browser is
+installed (not Firefox/WebKit) to keep the download lean.
 
 - API: http://localhost:4000/health → `{ "status": "ok" }`
 - Web: http://localhost:3000
