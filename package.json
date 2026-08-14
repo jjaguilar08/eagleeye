@@ -16,6 +16,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "typecheck": "pnpm --filter @eagleeye/types run build && pnpm -r run typecheck",
+    "test": "pnpm --filter @eagleeye/types run build && pnpm -r --if-present run test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "prepare": "husky"

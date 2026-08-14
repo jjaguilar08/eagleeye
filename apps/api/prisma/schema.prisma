@@ -86,7 +86,17 @@ model Article {
   pipelineRunId String
   url           String        @unique
   title         String
+  // Hostname of `url`, derived by the app (not provider-supplied) — stable
+  // across search providers.
   sourceDomain  String
+  // Publisher display name from the search provider (e.g. "BBC News", from
+  // NewsAPI's `source.name`) — distinct from sourceDomain, nullable since
+  // not every provider/result guarantees one.
+  sourceName    String?
+  // The article's own publish date, from the search provider — nullable for
+  // the same reason as sourceName. Distinct from discoveredAt (when *we*
+  // found it).
+  publishedAt   DateTime?
   status        ArticleStatus @default(DISCOVERED)
   discoveredAt  DateTime
   createdAt     DateTime      @default(now())

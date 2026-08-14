@@ -9,6 +9,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    env:
+      # Dummy connection string — only needed so `prisma generate` can parse
+      # the schema's datasource block; nothing in typecheck/lint/build/test
+      # actually connects to a database. No real secrets required in CI.
+      DATABASE_URL: "postgresql://eagleeye:eagleeye@localhost:5432/eagleeye?schema=public"
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -29,6 +34,9 @@ jobs:
 
       - name: Lint
         run: pnpm lint
+
+      - name: Test
+        run: pnpm test
 
       - name: Build
         run: pnpm build
