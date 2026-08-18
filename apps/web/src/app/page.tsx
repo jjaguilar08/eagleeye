@@ -1,15 +1,40 @@
 "use client";
 
 import { useEffect, useState, type FormEvent } from "react";
-import type { ArticleDTO, PipelineRunDTO, PipelineRunStatus, SettingDTO } from "@eagleeye/types";
+import type {
+  ArticleDTO,
+  ContactAttemptDTO,
+  PipelineRunDTO,
+  PipelineRunStatus,
+  SettingDTO,
+} from "@eagleeye/types";
 import {
   crawlPipelineRun,
   createPipelineRun,
+  discoverContacts,
   extractAuthors,
   getSettings,
   listPipelineRuns,
   updateSettings,
 } from "@/lib/api";
+
+// Priority order for which ContactAttempt "wins" as an author's headline
+// outcome — not most-recent, since a later attempt in the waterfall (e.g.
+// OUTLET_FALLBACK) can run after an earlier one already succeeded.
+const CONTACT_STATUS_PRIORITY: ContactAttemptDTO["status"][] = [
+  "FOUND",
+  "OUTLET_FALLBACK",
+  "NEEDS_REVIEW",
+  "FAILED",
+];
+
+function bestContactAttempt(attempts: ContactAttemptDTO[]): ContactAttemptDTO | null {
+  for (const status of CONTACT_STATUS_PRIORITY) {
+    const match = attempts.find((attempt) => attempt.status === status);
+    if (match) return match;
+  }
+  return null;
+}
 
 const RUN_STATUS_STYLES: Record<PipelineRunStatus, string> = {
   PENDING: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
@@ -39,6 +64,27 @@ function ArticleStatusBadge({ status }: { status: ArticleDTO["status"] }) {
     <span className={`rounded px-2 py-0.5 text-xs font-medium ${ARTICLE_STATUS_STYLES[status]}`}>
       {status}
     </span>
+  );
+}
+
+function ContactOutcome({ attempts }: { attempts: ContactAttemptDTO[] }) {
+  const best = bestContactAttempt(attempts);
+  if (!best) return null;
+
+  if (best.status === "FAILED") {
+    return (
+      <div className="mt-1 text-xs text-amber-700 dark:text-amber-400">
+        Contact: needs manual review — no email found across {attempts.length} attempt
+        {attempts.length === 1 ? "" : "s"}.
+      </div>
+    );
+  }
+
+  return (
+    <div className="mt-1 text-xs text-zinc-600 dark:text-zinc-400">
+      Contact: {best.emailCandidate} ({best.method}, {best.status}, confidence{" "}
+      {best.confidence.toFixed(2)})
+    </div>
   );
 }
 
@@ -83,6 +129,9 @@ function ArticleList({ articles }: { articles: ArticleDTO[] }) {
               )}
             </div>
           )}
+          {article.author && article.author.contactAttempts.length > 0 && (
+            <ContactOutcome attempts={article.author.contactAttempts} />
+          )}
         </li>
       ))}
     </ul>
@@ -103,6 +152,8 @@ export default function Home() {
   const [crawlError, setCrawlError] = useState<string | null>(null);
   const [extracting, setExtracting] = useState(false);
   const [extractError, setExtractError] = useState<string | null>(null);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoverError, setDiscoverError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -192,12 +243,31 @@ export default function Home() {
     }
   }
 
+  async function handleDiscoverContacts() {
+    if (!selectedRun || !settings?.automationEnabled) return;
+
+    setDiscovering(true);
+    setDiscoverError(null);
+    try {
+      const updated = await discoverContacts(selectedRun.id);
+      setRuns((prev) => prev.map((run) => (run.id === updated.id ? updated : run)));
+    } catch (error) {
+      setDiscoverError(error instanceof Error ? error.message : "Failed to discover contacts.");
+    } finally {
+      setDiscovering(false);
+    }
+  }
+
   const selectedRun = runs.find((run) => run.id === selectedRunId) ?? runs[0] ?? null;
   const maxAllowed = settings?.maxArticlesPerRun ?? 1;
   const discoveredCount =
     selectedRun?.articles.filter((article) => article.status === "DISCOVERED").length ?? 0;
   const crawledCount =
     selectedRun?.articles.filter((article) => article.status === "CRAWLED").length ?? 0;
+  const eligibleForContactCount =
+    selectedRun?.articles.filter(
+      (article) => article.author && article.author.contactAttempts.length === 0,
+    ).length ?? 0;
 
   return (
     <div className="mx-auto flex min-h-screen max-w-3xl flex-col gap-8 bg-zinc-50 px-6 py-10 dark:bg-black">
@@ -347,6 +417,34 @@ export default function Home() {
           {extractError && (
             <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
               {extractError}
+            </p>
+          )}
+          <div className="mb-3 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={handleDiscoverContacts}
+              disabled={
+                !settings?.automationEnabled || eligibleForContactCount === 0 || discovering
+              }
+              className="rounded border border-zinc-300 px-3 py-1 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+            >
+              {discovering ? "Discovering…" : "Discover Contacts"}
+            </button>
+            {!settings?.automationEnabled ? (
+              <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                Automation is off — turn it on above to discover contacts.
+              </span>
+            ) : (
+              eligibleForContactCount === 0 && (
+                <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                  No authors left needing contact discovery.
+                </span>
+              )
+            )}
+          </div>
+          {discoverError && (
+            <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+              {discoverError}
             </p>
           )}
           <ArticleList articles={selectedRun.articles} />

@@ -28,6 +28,20 @@ export type ArticleStatus = "DISCOVERED" | "CRAWLED" | "EXTRACTED" | "FAILED";
 export type AuthorExtractionMethod =
   "JSON_LD" | "META_TAG" | "BYLINE_PATTERN" | "AUTHOR_BIO_PAGE" | "STAFF_PAGE" | "NONE";
 
+export type ContactAttemptMethod =
+  "CONTACT_PAGE_SCAN" | "EMAIL_PATTERN_GUESS" | "OUTLET_FALLBACK" | "MANUAL";
+export type ContactAttemptStatus = "FOUND" | "OUTLET_FALLBACK" | "NEEDS_REVIEW" | "FAILED";
+
+export interface ContactAttemptDTO {
+  id: string;
+  authorId: string;
+  method: ContactAttemptMethod;
+  emailCandidate: string | null;
+  confidence: number;
+  status: ContactAttemptStatus;
+  createdAt: string;
+}
+
 export interface AuthorDTO {
   id: string;
   articleId: string;
@@ -36,6 +50,9 @@ export interface AuthorDTO {
   confidence: number;
   profileUrl: string | null;
   createdAt: string;
+  // Full attempt log, not just the winner — empty until Day 6's contact
+  // discovery has run for this author.
+  contactAttempts: ContactAttemptDTO[];
 }
 
 export interface ArticleDTO {

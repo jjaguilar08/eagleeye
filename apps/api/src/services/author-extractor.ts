@@ -61,7 +61,7 @@ function looksLikeUrl(value: string): boolean {
 // elements with no whitespace text node between them in the source (e.g. a
 // name <div> immediately followed by a date <div>) — plain `.text()` mashes
 // those into one word ("MarketBeatAugust 7") instead of "MarketBeat August 7".
-function spacedText($: CheerioAPI, $node: Cheerio<AnyNode>): string {
+export function spacedText($: CheerioAPI, $node: Cheerio<AnyNode>): string {
   const parts: string[] = [];
   $node.contents().each((_, child) => {
     if (child.type === "text") {

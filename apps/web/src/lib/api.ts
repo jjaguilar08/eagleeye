@@ -57,3 +57,7 @@ export function crawlPipelineRun(id: string): Promise<PipelineRunDTO> {
 export function extractAuthors(id: string): Promise<PipelineRunDTO> {
   return apiFetch<PipelineRunDTO>(`/pipeline-runs/${id}/extract-authors`, { method: "POST" });
 }
+
+export function discoverContacts(id: string): Promise<PipelineRunDTO> {
+  return apiFetch<PipelineRunDTO>(`/pipeline-runs/${id}/discover-contacts`, { method: "POST" });
+}

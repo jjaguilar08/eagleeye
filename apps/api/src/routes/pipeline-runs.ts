@@ -4,6 +4,17 @@ import { prisma } from "../lib/prisma.js";
 import { SearchService, SearchServiceError } from "../services/search.js";
 import { crawlerService } from "../services/crawler.js";
 import { extractAuthor } from "../services/author-extractor.js";
+import { discoverContacts } from "../services/contact-discovery.js";
+
+const contactAttemptSelect = {
+  id: true,
+  authorId: true,
+  method: true,
+  emailCandidate: true,
+  confidence: true,
+  status: true,
+  createdAt: true,
+} as const;
 
 const authorSelect = {
   id: true,
@@ -13,6 +24,7 @@ const authorSelect = {
   confidence: true,
   profileUrl: true,
   createdAt: true,
+  contactAttempts: { select: contactAttemptSelect, orderBy: { createdAt: "asc" } },
 } as const;
 
 // Excludes `rawHtml` from every API response — the dashboard only ever
@@ -231,6 +243,76 @@ export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
         });
 
         await prisma.article.update({ where: { id: article.id }, data: { status: "EXTRACTED" } });
+      }
+
+      const updated = await prisma.pipelineRun.findUnique({
+        where: { id: run.id },
+        include: { articles: { select: articleSelect } },
+      });
+
+      return updated;
+    },
+  );
+
+  // Same automation gate as .../crawl: contact/author-profile-page scanning
+  // means new real HTTP requests to outlet domains, unlike extract-authors
+  // (pure local computation over already-stored HTML).
+  app.post<{ Params: { id: string } }>(
+    "/pipeline-runs/:id/discover-contacts",
+    async (request, reply) => {
+      const settings = await prisma.setting.upsert({
+        where: { id: 1 },
+        update: {},
+        create: { id: 1 },
+      });
+
+      if (!settings.automationEnabled) {
+        return reply.code(403).send({
+          error: "Automation is disabled. Enable it in Settings before discovering contacts.",
+        });
+      }
+
+      const run = await prisma.pipelineRun.findUnique({
+        where: { id: request.params.id },
+        select: { id: true },
+      });
+
+      if (!run) {
+        return reply.code(404).send({ error: "Pipeline run not found" });
+      }
+
+      // Idempotency: only authors with no ContactAttempt records yet are
+      // eligible — whether discovery has run is queryable via that relation,
+      // no new pipeline-stage enum value needed.
+      const eligible = await prisma.article.findMany({
+        where: { pipelineRunId: run.id, status: "EXTRACTED" },
+        select: {
+          id: true,
+          sourceDomain: true,
+          author: { select: { id: true, name: true, profileUrl: true, contactAttempts: true } },
+        },
+      });
+
+      for (const article of eligible) {
+        if (!article.author || article.author.contactAttempts.length > 0) continue;
+
+        const results = await discoverContacts(
+          { name: article.author.name, profileUrl: article.author.profileUrl },
+          article.sourceDomain,
+          (url) => crawlerService.fetchPage(url),
+        );
+
+        for (const result of results) {
+          await prisma.contactAttempt.create({
+            data: {
+              authorId: article.author.id,
+              method: result.method,
+              emailCandidate: result.emailCandidate,
+              confidence: result.confidence,
+              status: result.status,
+            },
+          });
+        }
       }
 
       const updated = await prisma.pipelineRun.findUnique({

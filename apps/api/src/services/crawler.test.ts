@@ -220,7 +220,65 @@ describe("CrawlerService.crawlArticle", () => {
     expect(result).toEqual({ status: "FAILED", crawlError: "invalid_url" });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+});
 
+describe("CrawlerService.fetchPage", () => {
+  it("is the shared low-level helper crawlArticle itself now delegates to", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith("/robots.txt")) return robotsResponse(404);
+      return htmlResponse(200, SERVER_RENDERED_HTML);
+    });
+    const service = new CrawlerService({ fetchImpl, sleepImpl: noopSleep });
+
+    const result = await service.fetchPage("https://news.example.test/contact");
+
+    expect(result).toEqual({ html: SERVER_RENDERED_HTML });
+  });
+
+  it("applies the same robots.txt gate as crawlArticle", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith("/robots.txt")) {
+        return robotsResponse(200, "User-agent: *\nDisallow: /contact");
+      }
+      throw new Error("should not fetch a disallowed page");
+    });
+    const service = new CrawlerService({ fetchImpl, sleepImpl: noopSleep });
+
+    const result = await service.fetchPage("https://news.example.test/contact");
+
+    expect(result).toEqual({ error: "robots_disallowed" });
+  });
+
+  it("returns an error for a 4xx contact page without retrying", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith("/robots.txt")) return robotsResponse(404);
+      return htmlResponse(404, "not found");
+    });
+    const service = new CrawlerService({ fetchImpl, sleepImpl: noopSleep, maxRetries: 2 });
+
+    const result = await service.fetchPage("https://news.example.test/about");
+
+    expect(result).toEqual({ error: "http_404" });
+  });
+
+  it("shares the same per-domain robots.txt cache as crawlArticle", async () => {
+    const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
+      if (url.endsWith("/robots.txt")) return robotsResponse(404);
+      return htmlResponse(200, SERVER_RENDERED_HTML);
+    });
+    const service = new CrawlerService({ fetchImpl, sleepImpl: noopSleep });
+
+    await service.crawlArticle("https://news.example.test/article-1");
+    await service.fetchPage("https://news.example.test/contact");
+
+    const robotsCalls = fetchImpl.mock.calls.filter(([url]) =>
+      (url as string).endsWith("/robots.txt"),
+    );
+    expect(robotsCalls).toHaveLength(1);
+  });
+});
+
+describe("CrawlerService.crawlArticle rate limiting", () => {
   it("waits at least minRequestIntervalMs between two requests to the same domain", async () => {
     const fetchImpl = vi.fn().mockImplementation(async (url: string) => {
       if (url.endsWith("/robots.txt")) return robotsResponse(404);

@@ -26,6 +26,8 @@ interface Robot {
 export type CrawlResult =
   { status: "CRAWLED"; rawHtml: string } | { status: "FAILED"; crawlError: string };
 
+export type FetchPageResult = { html: string } | { error: string };
+
 export interface CrawlerServiceConfig {
   fetchImpl?: typeof fetch;
   /** Renders `url` with a real browser and returns the rendered HTML. Defaults to a Playwright/Chromium implementation, lazily imported. */
@@ -115,19 +117,35 @@ export class CrawlerService {
   }
 
   async crawlArticle(url: string): Promise<CrawlResult> {
+    const result = await this.fetchPage(url);
+    if ("error" in result) {
+      return { status: "FAILED", crawlError: result.error };
+    }
+    return { status: "CRAWLED", rawHtml: result.html };
+  }
+
+  /**
+   * Low-level page fetch shared by every crawl target — articles (via
+   * `crawlArticle`) and, as of Day 6, contact/author-profile pages: robots.txt
+   * check, per-domain rate limiting, retry-on-5xx, and a Playwright fallback
+   * when the plain fetch looks like an empty JS shell. Any new fetch against
+   * an outlet domain should go through this rather than a bare `fetch`, so it
+   * gets the same politeness treatment as article crawling.
+   */
+  async fetchPage(url: string): Promise<FetchPageResult> {
     const domain = hostnameOf(url);
     if (!domain) {
-      return { status: "FAILED", crawlError: "invalid_url" };
+      return { error: "invalid_url" };
     }
 
     const robots = await this.getRobots(domain);
     if (robots?.isAllowed(url, this.userAgent) === false) {
-      return { status: "FAILED", crawlError: "robots_disallowed" };
+      return { error: "robots_disallowed" };
     }
 
     const fetchResult = await this.fetchHtml(url, domain);
     if ("crawlError" in fetchResult) {
-      return { status: "FAILED", crawlError: fetchResult.crawlError };
+      return { error: fetchResult.crawlError };
     }
 
     let html = fetchResult.html;
@@ -138,11 +156,11 @@ export class CrawlerService {
         html = await this.renderPage(url, this.timeoutMs);
         this.markRequest(domain);
       } catch {
-        return { status: "FAILED", crawlError: "render_failed" };
+        return { error: "render_failed" };
       }
     }
 
-    return { status: "CRAWLED", rawHtml: html };
+    return { html };
   }
 
   private async getRobots(domain: string): Promise<Robot | null> {
