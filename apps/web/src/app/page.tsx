@@ -3,9 +3,12 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type {
   ArticleDTO,
+  ArticleStatus,
   ContactAttemptDTO,
+  ContactAttemptStatus,
   PipelineRunDTO,
   PipelineRunStatus,
+  PipelineStage,
   SettingDTO,
 } from "@eagleeye/types";
 import {
@@ -13,10 +16,23 @@ import {
   createPipelineRun,
   discoverContacts,
   extractAuthors,
+  getPipelineRun,
   getSettings,
   listPipelineRuns,
+  stopPipelineRun,
   updateSettings,
 } from "@/lib/api";
+
+// A run is "in flight" — the Worker either hasn't picked it up yet (PENDING)
+// or is actively working through stages (RUNNING). Both the live-polling
+// effect and the Stop button key off this, not just RUNNING alone, so a
+// run doesn't sit unpolled/unstoppable during the brief PENDING window
+// before the Worker starts it.
+function isRunInFlight(status: PipelineRunStatus): boolean {
+  return status === "PENDING" || status === "RUNNING";
+}
+
+const POLL_INTERVAL_MS = 2000;
 
 // Priority order for which ContactAttempt "wins" as an author's headline
 // outcome — not most-recent, since a later attempt in the waterfall (e.g.
@@ -52,6 +68,21 @@ function StatusBadge({ status }: { status: PipelineRunStatus }) {
   );
 }
 
+const STAGE_LABELS: Record<PipelineStage, string> = {
+  SEARCHING: "Searching for articles",
+  CRAWLING: "Crawling articles",
+  EXTRACTING: "Extracting authors",
+  DISCOVERING_CONTACTS: "Discovering contacts",
+};
+
+function StageBadge({ stage }: { stage: PipelineStage }) {
+  return (
+    <span className="rounded bg-blue-100 px-2 py-0.5 text-xs font-medium text-blue-800 dark:bg-blue-900 dark:text-blue-200">
+      {STAGE_LABELS[stage]}…
+    </span>
+  );
+}
+
 const ARTICLE_STATUS_STYLES: Record<ArticleDTO["status"], string> = {
   DISCOVERED: "bg-zinc-200 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
   CRAWLED: "bg-green-100 text-green-800 dark:bg-green-900 dark:text-green-200",
@@ -64,6 +95,60 @@ function ArticleStatusBadge({ status }: { status: ArticleDTO["status"] }) {
     <span className={`rounded px-2 py-0.5 text-xs font-medium ${ARTICLE_STATUS_STYLES[status]}`}>
       {status}
     </span>
+  );
+}
+
+const ARTICLE_STATUS_ORDER: ArticleStatus[] = ["DISCOVERED", "CRAWLED", "EXTRACTED", "FAILED"];
+const CONTACT_STATUS_ORDER: ContactAttemptStatus[] = [
+  "FOUND",
+  "OUTLET_FALLBACK",
+  "NEEDS_REVIEW",
+  "FAILED",
+];
+
+function countBy<T extends string>(values: T[]): Partial<Record<T, number>> {
+  const counts: Partial<Record<T, number>> = {};
+  for (const value of values) {
+    counts[value] = (counts[value] ?? 0) + 1;
+  }
+  return counts;
+}
+
+function ProgressBreakdown({ articles }: { articles: ArticleDTO[] }) {
+  const articleCounts = countBy(articles.map((article) => article.status));
+  const contactCounts = countBy(
+    articles.flatMap((article) => {
+      const best = article.author ? bestContactAttempt(article.author.contactAttempts) : null;
+      return best ? [best.status] : [];
+    }),
+  );
+  const hasContactCounts = Object.keys(contactCounts).length > 0;
+
+  return (
+    <div className="mb-3 flex flex-col gap-1 text-xs text-zinc-600 dark:text-zinc-400">
+      <div className="flex flex-wrap gap-x-4 gap-y-1">
+        {ARTICLE_STATUS_ORDER.map(
+          (status) =>
+            articleCounts[status] !== undefined && (
+              <span key={status}>
+                {status}: {articleCounts[status]}
+              </span>
+            ),
+        )}
+      </div>
+      {hasContactCounts && (
+        <div className="flex flex-wrap gap-x-4 gap-y-1">
+          {CONTACT_STATUS_ORDER.map(
+            (status) =>
+              contactCounts[status] !== undefined && (
+                <span key={status}>
+                  Contact {status}: {contactCounts[status]}
+                </span>
+              ),
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -148,6 +233,8 @@ export default function Home() {
   const [togglePending, setTogglePending] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState<string | null>(null);
   const [crawling, setCrawling] = useState(false);
   const [crawlError, setCrawlError] = useState<string | null>(null);
   const [extracting, setExtracting] = useState(false);
@@ -179,6 +266,37 @@ export default function Home() {
     };
   }, []);
 
+  const selectedRun = runs.find((run) => run.id === selectedRunId) ?? runs[0] ?? null;
+
+  // Polls the selected run's own GET endpoint while it's in flight (PENDING
+  // or RUNNING) so the dashboard reflects the Worker's progress through
+  // SEARCHING/CRAWLING/EXTRACTING/DISCOVERING_CONTACTS live, stopping as
+  // soon as the run reaches a terminal status.
+  useEffect(() => {
+    const runId = selectedRun?.id;
+    const status = selectedRun?.status;
+    if (!runId || !status || !isRunInFlight(status)) return;
+
+    let cancelled = false;
+    const interval = setInterval(() => {
+      void (async () => {
+        try {
+          const updated = await getPipelineRun(runId);
+          if (!cancelled) {
+            setRuns((prev) => prev.map((run) => (run.id === updated.id ? updated : run)));
+          }
+        } catch {
+          // Transient poll failure — the next tick will just try again.
+        }
+      })();
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [selectedRun?.id, selectedRun?.status]);
+
   async function handleToggleAutomation() {
     if (!settings) return;
     setTogglePending(true);
@@ -200,16 +318,31 @@ export default function Home() {
     setSubmitting(true);
     setSubmitError(null);
     try {
+      // Returns immediately once the run is created and queued — it starts
+      // out PENDING with no articles yet; the live-polling effect above
+      // picks up progress as soon as the Worker starts processing it.
       const run = await createPipelineRun({ topic, maxArticles });
       setRuns((prev) => [run, ...prev.filter((r) => r.id !== run.id)]);
       setSelectedRunId(run.id);
-      if (run.error) {
-        setSubmitError(run.error);
-      }
     } catch (error) {
       setSubmitError(error instanceof Error ? error.message : "Failed to start run.");
     } finally {
       setSubmitting(false);
+    }
+  }
+
+  async function handleStop() {
+    if (!selectedRun) return;
+
+    setStopping(true);
+    setStopError(null);
+    try {
+      const updated = await stopPipelineRun(selectedRun.id);
+      setRuns((prev) => prev.map((run) => (run.id === updated.id ? updated : run)));
+    } catch (error) {
+      setStopError(error instanceof Error ? error.message : "Failed to stop run.");
+    } finally {
+      setStopping(false);
     }
   }
 
@@ -258,8 +391,8 @@ export default function Home() {
     }
   }
 
-  const selectedRun = runs.find((run) => run.id === selectedRunId) ?? runs[0] ?? null;
   const maxAllowed = settings?.maxArticlesPerRun ?? 1;
+  const runInFlight = selectedRun ? isRunInFlight(selectedRun.status) : false;
   const discoveredCount =
     selectedRun?.articles.filter((article) => article.status === "DISCOVERED").length ?? 0;
   const crawledCount =
@@ -268,6 +401,11 @@ export default function Home() {
     selectedRun?.articles.filter(
       (article) => article.author && article.author.contactAttempts.length === 0,
     ).length ?? 0;
+  // Manual per-stage controls are for re-running a single stage on an
+  // existing run — while the automated Worker is actively on the same run,
+  // triggering one manually would just race it, so they're disabled with a
+  // shared reason rather than left free to double-process.
+  const manualControlsBlockedReason = runInFlight ? "Run is in progress." : null;
 
   return (
     <div className="mx-auto flex min-h-screen max-w-3xl flex-col gap-8 bg-zinc-50 px-6 py-10 dark:bg-black">
@@ -349,7 +487,7 @@ export default function Home() {
               disabled={!settings?.automationEnabled || submitting}
               className="rounded bg-black px-4 py-1.5 text-sm font-medium text-white disabled:opacity-40 dark:bg-white dark:text-black"
             >
-              {submitting ? "Running…" : "Start run"}
+              {submitting ? "Starting…" : "Start run"}
             </button>
             {!settings?.automationEnabled && (
               <span className="text-xs text-zinc-500 dark:text-zinc-400">
@@ -366,87 +504,142 @@ export default function Home() {
             <h2 className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
               Run detail — {selectedRun.topic}
             </h2>
-            <StatusBadge status={selectedRun.status} />
+            <div className="flex items-center gap-2">
+              {selectedRun.currentStage && <StageBadge stage={selectedRun.currentStage} />}
+              <StatusBadge status={selectedRun.status} />
+            </div>
           </div>
+
           {selectedRun.error && (
             <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
               {selectedRun.error}
             </p>
           )}
-          <div className="mb-3 flex items-center gap-3">
-            <button
-              type="button"
-              onClick={handleCrawl}
-              disabled={!settings?.automationEnabled || discoveredCount === 0 || crawling}
-              className="rounded border border-zinc-300 px-3 py-1 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
-            >
-              {crawling ? "Crawling…" : "Crawl Articles"}
-            </button>
-            {!settings?.automationEnabled ? (
+
+          {runInFlight && (
+            <div className="mb-3 flex items-center gap-3">
+              <button
+                type="button"
+                onClick={handleStop}
+                disabled={stopping}
+                className="rounded border border-red-300 px-3 py-1 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950"
+              >
+                {stopping ? "Stopping…" : "Stop"}
+              </button>
               <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                Automation is off — turn it on above to crawl articles.
+                Stopping halts at the next stage or article boundary — not instant.
               </span>
-            ) : (
-              discoveredCount === 0 && (
-                <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                  No discovered articles left to crawl.
-                </span>
-              )
-            )}
-          </div>
-          {crawlError && (
+            </div>
+          )}
+          {stopError && (
             <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-              {crawlError}
+              {stopError}
             </p>
           )}
-          <div className="mb-3 flex items-center gap-3">
-            <button
-              type="button"
-              onClick={handleExtractAuthors}
-              disabled={crawledCount === 0 || extracting}
-              className="rounded border border-zinc-300 px-3 py-1 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
-            >
-              {extracting ? "Extracting…" : "Extract Authors"}
-            </button>
-            {crawledCount === 0 && (
-              <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                No crawled articles left to extract authors from.
-              </span>
-            )}
-          </div>
-          {extractError && (
-            <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-              {extractError}
-            </p>
-          )}
-          <div className="mb-3 flex items-center gap-3">
-            <button
-              type="button"
-              onClick={handleDiscoverContacts}
-              disabled={
-                !settings?.automationEnabled || eligibleForContactCount === 0 || discovering
-              }
-              className="rounded border border-zinc-300 px-3 py-1 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
-            >
-              {discovering ? "Discovering…" : "Discover Contacts"}
-            </button>
-            {!settings?.automationEnabled ? (
-              <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                Automation is off — turn it on above to discover contacts.
-              </span>
-            ) : (
-              eligibleForContactCount === 0 && (
-                <span className="text-xs text-zinc-500 dark:text-zinc-400">
-                  No authors left needing contact discovery.
-                </span>
-              )
-            )}
-          </div>
-          {discoverError && (
-            <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
-              {discoverError}
-            </p>
-          )}
+
+          <ProgressBreakdown articles={selectedRun.articles} />
+
+          <details className="mb-3 rounded border border-zinc-200 dark:border-zinc-800">
+            <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium text-zinc-700 dark:text-zinc-300">
+              Manual controls
+            </summary>
+            <div className="border-t border-zinc-200 p-3 dark:border-zinc-800">
+              <div className="mb-3 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleCrawl}
+                  disabled={
+                    !settings?.automationEnabled || discoveredCount === 0 || crawling || runInFlight
+                  }
+                  className="rounded border border-zinc-300 px-3 py-1 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+                >
+                  {crawling ? "Crawling…" : "Crawl Articles"}
+                </button>
+                {manualControlsBlockedReason ? (
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {manualControlsBlockedReason}
+                  </span>
+                ) : !settings?.automationEnabled ? (
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                    Automation is off — turn it on above to crawl articles.
+                  </span>
+                ) : (
+                  discoveredCount === 0 && (
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                      No discovered articles left to crawl.
+                    </span>
+                  )
+                )}
+              </div>
+              {crawlError && (
+                <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+                  {crawlError}
+                </p>
+              )}
+              <div className="mb-3 flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleExtractAuthors}
+                  disabled={crawledCount === 0 || extracting || runInFlight}
+                  className="rounded border border-zinc-300 px-3 py-1 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+                >
+                  {extracting ? "Extracting…" : "Extract Authors"}
+                </button>
+                {manualControlsBlockedReason ? (
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {manualControlsBlockedReason}
+                  </span>
+                ) : (
+                  crawledCount === 0 && (
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                      No crawled articles left to extract authors from.
+                    </span>
+                  )
+                )}
+              </div>
+              {extractError && (
+                <p className="mb-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+                  {extractError}
+                </p>
+              )}
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleDiscoverContacts}
+                  disabled={
+                    !settings?.automationEnabled ||
+                    eligibleForContactCount === 0 ||
+                    discovering ||
+                    runInFlight
+                  }
+                  className="rounded border border-zinc-300 px-3 py-1 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+                >
+                  {discovering ? "Discovering…" : "Discover Contacts"}
+                </button>
+                {manualControlsBlockedReason ? (
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                    {manualControlsBlockedReason}
+                  </span>
+                ) : !settings?.automationEnabled ? (
+                  <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                    Automation is off — turn it on above to discover contacts.
+                  </span>
+                ) : (
+                  eligibleForContactCount === 0 && (
+                    <span className="text-xs text-zinc-500 dark:text-zinc-400">
+                      No authors left needing contact discovery.
+                    </span>
+                  )
+                )}
+              </div>
+              {discoverError && (
+                <p className="mt-3 rounded border border-red-300 bg-red-50 px-3 py-2 text-sm text-red-800 dark:border-red-900 dark:bg-red-950 dark:text-red-200">
+                  {discoverError}
+                </p>
+              )}
+            </div>
+          </details>
+
           <ArticleList articles={selectedRun.articles} />
         </section>
       )}

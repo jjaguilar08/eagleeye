@@ -50,6 +50,14 @@ export function createPipelineRun(body: CreatePipelineRunRequest): Promise<Pipel
   return apiFetch<PipelineRunDTO>("/pipeline-runs", { method: "POST", body: JSON.stringify(body) });
 }
 
+export function getPipelineRun(id: string): Promise<PipelineRunDTO> {
+  return apiFetch<PipelineRunDTO>(`/pipeline-runs/${id}`);
+}
+
+export function stopPipelineRun(id: string): Promise<PipelineRunDTO> {
+  return apiFetch<PipelineRunDTO>(`/pipeline-runs/${id}/stop`, { method: "POST" });
+}
+
 export function crawlPipelineRun(id: string): Promise<PipelineRunDTO> {
   return apiFetch<PipelineRunDTO>(`/pipeline-runs/${id}/crawl`, { method: "POST" });
 }

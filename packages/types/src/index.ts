@@ -23,6 +23,10 @@ export interface UpdateSettingRequest {
 // --- Pipeline runs / articles ---
 
 export type PipelineRunStatus = "PENDING" | "RUNNING" | "COMPLETED" | "FAILED" | "STOPPED";
+// Which of the four pipeline stages the Day 7 BullMQ worker is currently on.
+// Distinct from PipelineRunStatus (overall run health) — null whenever the
+// run isn't actively being worked (before start or after a terminal status).
+export type PipelineStage = "SEARCHING" | "CRAWLING" | "EXTRACTING" | "DISCOVERING_CONTACTS";
 export type ArticleStatus = "DISCOVERED" | "CRAWLED" | "EXTRACTED" | "FAILED";
 
 export type AuthorExtractionMethod =
@@ -84,6 +88,7 @@ export interface PipelineRunDTO {
   maxDrafts: number;
   maxSends: number;
   status: PipelineRunStatus;
+  currentStage: PipelineStage | null;
   startedAt: string | null;
   completedAt: string | null;
   createdAt: string;

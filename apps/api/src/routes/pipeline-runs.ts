@@ -1,10 +1,13 @@
 import type { FastifyInstance } from "fastify";
 import type { CreatePipelineRunRequest } from "@eagleeye/types";
 import { prisma } from "../lib/prisma.js";
-import { SearchService, SearchServiceError } from "../services/search.js";
-import { crawlerService } from "../services/crawler.js";
-import { extractAuthor } from "../services/author-extractor.js";
-import { discoverContacts } from "../services/contact-discovery.js";
+import { enqueuePipelineRun } from "../lib/pipeline-queue.js";
+import {
+  getRunFailureReason,
+  runCrawlStage,
+  runExtractStage,
+  runDiscoverStage,
+} from "../services/pipeline-orchestrator.js";
 
 const contactAttemptSelect = {
   id: true,
@@ -46,6 +49,36 @@ const articleSelect = {
   author: { select: authorSelect },
 } as const;
 
+const runSelect = {
+  id: true,
+  topic: true,
+  maxArticles: true,
+  maxDrafts: true,
+  maxSends: true,
+  status: true,
+  currentStage: true,
+  startedAt: true,
+  completedAt: true,
+  createdAt: true,
+  articles: { select: articleSelect },
+} as const;
+
+type RunRow = Awaited<ReturnType<typeof findRun>>;
+
+function findRun(id: string) {
+  return prisma.pipelineRun.findUnique({ where: { id }, select: runSelect });
+}
+
+// Attaches the transient `error` field (Day 3's stopgap — see
+// pipeline-orchestrator.ts's failureReasons map) whenever a run is FAILED
+// and a reason was recorded for it. Automated runs fail inside the Worker,
+// with no HTTP request to attach an error to directly, so GET responses are
+// where the dashboard actually learns why.
+function withError(run: NonNullable<RunRow>) {
+  const reason = run.status === "FAILED" ? getRunFailureReason(run.id) : undefined;
+  return reason ? { ...run, error: reason } : run;
+}
+
 export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Body: CreatePipelineRunRequest }>("/pipeline-runs", async (request, reply) => {
     const { topic, maxArticles } = request.body ?? {};
@@ -80,77 +113,54 @@ export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
         maxArticles: clampedMaxArticles,
         maxDrafts: settings.maxDraftsPerRun,
         maxSends: settings.maxSendsPerRun,
-        status: "RUNNING",
-        startedAt: new Date(),
+        status: "PENDING",
       },
+      select: runSelect,
     });
 
-    const apiKey = process.env["NEWSAPI_KEY"];
+    // The actual search/crawl/extract/discover work happens in the Worker
+    // (see lib/pipeline-queue.ts + services/pipeline-orchestrator.ts) — this
+    // request returns as soon as the job is queued, not once the run finishes.
+    await enqueuePipelineRun(run.id);
 
-    if (!apiKey) {
-      const failed = await failRun(run.id);
-      return reply.code(201).send({
-        ...failed,
-        error: "Search is not configured: missing NEWSAPI_KEY.",
-      });
-    }
-
-    const searchService = new SearchService({ apiKey });
-
-    try {
-      const candidates = await searchService.searchArticles(topic, clampedMaxArticles);
-
-      if (candidates.length > 0) {
-        await prisma.article.createMany({
-          data: candidates.map((candidate) => ({
-            pipelineRunId: run.id,
-            url: candidate.url,
-            title: candidate.title,
-            sourceDomain: candidate.sourceDomain,
-            sourceName: candidate.sourceName,
-            publishedAt: candidate.publishedAt ? new Date(candidate.publishedAt) : null,
-            status: "DISCOVERED" as const,
-            discoveredAt: new Date(),
-          })),
-          // Article.url is globally unique — a URL discovered by an earlier
-          // run stays attached to that run rather than being duplicated here.
-          skipDuplicates: true,
-        });
-      }
-
-      const completed = await prisma.pipelineRun.update({
-        where: { id: run.id },
-        data: { status: "COMPLETED", completedAt: new Date() },
-        include: { articles: { select: articleSelect } },
-      });
-
-      return reply.code(201).send(completed);
-    } catch (error) {
-      const message =
-        error instanceof SearchServiceError ? error.message : "Search failed unexpectedly.";
-      const failed = await failRun(run.id);
-      return reply.code(201).send({ ...failed, error: message });
-    }
+    return reply.code(201).send(withError(run));
   });
 
   app.get("/pipeline-runs", async () => {
-    return prisma.pipelineRun.findMany({
+    const runs = await prisma.pipelineRun.findMany({
       orderBy: { createdAt: "desc" },
-      include: { articles: { select: articleSelect } },
+      select: runSelect,
     });
+    return runs.map(withError);
   });
 
   app.get<{ Params: { id: string } }>("/pipeline-runs/:id", async (request, reply) => {
-    const run = await prisma.pipelineRun.findUnique({
-      where: { id: request.params.id },
-      include: { articles: { select: articleSelect } },
-    });
+    const run = await findRun(request.params.id);
 
     if (!run) {
       return reply.code(404).send({ error: "Pipeline run not found" });
     }
 
-    return run;
+    return withError(run);
+  });
+
+  // Cooperative — sets status STOPPED and lets the Worker's own checks
+  // (before each stage, and before each article within a stage's loop) halt
+  // the run at the next checkpoint, bounded to roughly one article's
+  // processing time. This endpoint does not forcibly kill in-flight work.
+  app.post<{ Params: { id: string } }>("/pipeline-runs/:id/stop", async (request, reply) => {
+    const run = await findRun(request.params.id);
+
+    if (!run) {
+      return reply.code(404).send({ error: "Pipeline run not found" });
+    }
+
+    if (run.status === "PENDING" || run.status === "RUNNING") {
+      await prisma.pipelineRun.update({ where: { id: run.id }, data: { status: "STOPPED" } });
+    }
+
+    const updated = await findRun(run.id);
+    return withError(updated!);
   });
 
   app.post<{ Params: { id: string } }>("/pipeline-runs/:id/crawl", async (request, reply) => {
@@ -166,39 +176,16 @@ export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
         .send({ error: "Automation is disabled. Enable it in Settings before crawling." });
     }
 
-    const run = await prisma.pipelineRun.findUnique({
-      where: { id: request.params.id },
-      include: { articles: { select: articleSelect } },
-    });
+    const run = await findRun(request.params.id);
 
     if (!run) {
       return reply.code(404).send({ error: "Pipeline run not found" });
     }
 
-    const discovered = run.articles.filter((article) => article.status === "DISCOVERED");
+    await runCrawlStage(run.id);
 
-    // Sequential, not concurrent — there's no job queue yet (Day 7), and the
-    // per-domain rate limiter already serializes same-domain requests
-    // anyway, so concurrency would only help articles on different domains
-    // at the cost of complexity this day doesn't need.
-    for (const article of discovered) {
-      const result = await crawlerService.crawlArticle(article.url);
-
-      await prisma.article.update({
-        where: { id: article.id },
-        data:
-          result.status === "CRAWLED"
-            ? { status: "CRAWLED", rawHtml: result.rawHtml, crawlError: null }
-            : { status: "FAILED", crawlError: result.crawlError },
-      });
-    }
-
-    const updated = await prisma.pipelineRun.findUnique({
-      where: { id: run.id },
-      include: { articles: { select: articleSelect } },
-    });
-
-    return updated;
+    const updated = await findRun(run.id);
+    return withError(updated!);
   });
 
   // No automation gate here, unlike /pipeline-runs and .../crawl above:
@@ -209,48 +196,16 @@ export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
   app.post<{ Params: { id: string } }>(
     "/pipeline-runs/:id/extract-authors",
     async (request, reply) => {
-      const run = await prisma.pipelineRun.findUnique({
-        where: { id: request.params.id },
-        select: { id: true },
-      });
+      const run = await findRun(request.params.id);
 
       if (!run) {
         return reply.code(404).send({ error: "Pipeline run not found" });
       }
 
-      // Fetched separately (not via articleSelect) so rawHtml never ends up
-      // on a response object elsewhere in this route — same convention as
-      // the crawler route excluding it from every returned Article shape.
-      const pending = await prisma.article.findMany({
-        where: { pipelineRunId: run.id, status: "CRAWLED", author: null },
-        select: { id: true, url: true, rawHtml: true },
-      });
+      await runExtractStage(run.id);
 
-      for (const article of pending) {
-        // CRAWLED articles always have rawHtml set by the crawler; the ""
-        // fallback is just a defensive guard, and would itself simply
-        // extract to a NONE result rather than throwing.
-        const extraction = extractAuthor(article.rawHtml ?? "", article.url);
-
-        await prisma.author.create({
-          data: {
-            articleId: article.id,
-            name: extraction.name,
-            extractionMethod: extraction.method,
-            confidence: extraction.confidence,
-            profileUrl: extraction.profileUrl,
-          },
-        });
-
-        await prisma.article.update({ where: { id: article.id }, data: { status: "EXTRACTED" } });
-      }
-
-      const updated = await prisma.pipelineRun.findUnique({
-        where: { id: run.id },
-        include: { articles: { select: articleSelect } },
-      });
-
-      return updated;
+      const updated = await findRun(run.id);
+      return withError(updated!);
     },
   );
 
@@ -272,63 +227,16 @@ export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
         });
       }
 
-      const run = await prisma.pipelineRun.findUnique({
-        where: { id: request.params.id },
-        select: { id: true },
-      });
+      const run = await findRun(request.params.id);
 
       if (!run) {
         return reply.code(404).send({ error: "Pipeline run not found" });
       }
 
-      // Idempotency: only authors with no ContactAttempt records yet are
-      // eligible — whether discovery has run is queryable via that relation,
-      // no new pipeline-stage enum value needed.
-      const eligible = await prisma.article.findMany({
-        where: { pipelineRunId: run.id, status: "EXTRACTED" },
-        select: {
-          id: true,
-          sourceDomain: true,
-          author: { select: { id: true, name: true, profileUrl: true, contactAttempts: true } },
-        },
-      });
+      await runDiscoverStage(run.id);
 
-      for (const article of eligible) {
-        if (!article.author || article.author.contactAttempts.length > 0) continue;
-
-        const results = await discoverContacts(
-          { name: article.author.name, profileUrl: article.author.profileUrl },
-          article.sourceDomain,
-          (url) => crawlerService.fetchPage(url),
-        );
-
-        for (const result of results) {
-          await prisma.contactAttempt.create({
-            data: {
-              authorId: article.author.id,
-              method: result.method,
-              emailCandidate: result.emailCandidate,
-              confidence: result.confidence,
-              status: result.status,
-            },
-          });
-        }
-      }
-
-      const updated = await prisma.pipelineRun.findUnique({
-        where: { id: run.id },
-        include: { articles: { select: articleSelect } },
-      });
-
-      return updated;
+      const updated = await findRun(run.id);
+      return withError(updated!);
     },
   );
-}
-
-function failRun(runId: string) {
-  return prisma.pipelineRun.update({
-    where: { id: runId },
-    data: { status: "FAILED", completedAt: new Date() },
-    include: { articles: { select: articleSelect } },
-  });
 }

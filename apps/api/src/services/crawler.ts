@@ -172,9 +172,19 @@ export class CrawlerService {
     const robotsUrl = `https://${domain}/robots.txt`;
     let robots: Robot | null = null;
 
+    // Same AbortController+timeoutMs pattern as the page fetch below — a
+    // robots.txt endpoint that hangs rather than actively refusing (no
+    // response, no RST) would otherwise stall with no bound at all, since
+    // fetch() itself has no default timeout. Found live: this made a Day 7
+    // Stop request's "roughly one article" cancellation bound balloon to
+    // 100+ seconds for one slow domain.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
     try {
       await this.waitForRateLimit(domain);
       const response = await this.fetchImpl(robotsUrl, {
+        signal: controller.signal,
         headers: { "User-Agent": this.userAgent },
       });
       this.markRequest(domain);
@@ -184,8 +194,11 @@ export class CrawlerService {
       // Non-OK (e.g. 404) means no robots.txt was published — fail open
       // (treat as allowed), matching standard crawler convention.
     } catch {
-      // Network failure fetching robots.txt — fail open rather than
-      // blocking every crawl on that domain for the rest of the process.
+      // Network failure (including our own abort on timeout) fetching
+      // robots.txt — fail open rather than blocking every crawl on that
+      // domain for the rest of the process.
+    } finally {
+      clearTimeout(timeout);
     }
 
     this.robotsCache.set(domain, robots);

@@ -29,6 +29,17 @@ enum ArticleStatus {
   FAILED
 }
 
+// Which of the four pipeline stages the BullMQ worker is currently on for a
+// RUNNING run. Distinct from PipelineRun.status (overall run health) — null
+// whenever the run isn't actively being worked (before start or after a
+// terminal status).
+enum PipelineStage {
+  SEARCHING
+  CRAWLING
+  EXTRACTING
+  DISCOVERING_CONTACTS
+}
+
 enum AuthorExtractionMethod {
   JSON_LD
   META_TAG
@@ -66,15 +77,16 @@ enum MessageDirection {
 }
 
 model PipelineRun {
-  id          String            @id @default(cuid())
-  topic       String
-  maxArticles Int
-  maxDrafts   Int
-  maxSends    Int
-  status      PipelineRunStatus @default(PENDING)
-  startedAt   DateTime?
-  completedAt DateTime?
-  createdAt   DateTime          @default(now())
+  id           String            @id @default(cuid())
+  topic        String
+  maxArticles  Int
+  maxDrafts    Int
+  maxSends     Int
+  status       PipelineRunStatus @default(PENDING)
+  currentStage PipelineStage?
+  startedAt    DateTime?
+  completedAt  DateTime?
+  createdAt    DateTime          @default(now())
 
   articles Article[]
 

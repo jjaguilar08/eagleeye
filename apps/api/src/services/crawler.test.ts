@@ -220,6 +220,34 @@ describe("CrawlerService.crawlArticle", () => {
     expect(result).toEqual({ status: "FAILED", crawlError: "invalid_url" });
     expect(fetchImpl).not.toHaveBeenCalled();
   });
+
+  it("fails open (allowed) and does not hang forever when robots.txt itself never responds", async () => {
+    // Found live during Day 7 Stop verification: a robots.txt fetch with no
+    // AbortController would stall indefinitely on a domain that hangs
+    // rather than actively refusing — this bounds it to timeoutMs, same as
+    // the page fetch, rather than leaving it unbounded.
+    const fetchImpl = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/robots.txt")) {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            const abortError = new Error("aborted");
+            abortError.name = "AbortError";
+            reject(abortError);
+          });
+        });
+      }
+      return htmlResponse(200, SERVER_RENDERED_HTML);
+    });
+    const service = new CrawlerService({
+      fetchImpl,
+      sleepImpl: noopSleep,
+      timeoutMs: 1,
+    });
+
+    const result = await service.crawlArticle("https://hangs.example.test/article-1");
+
+    expect(result).toEqual({ status: "CRAWLED", rawHtml: SERVER_RENDERED_HTML });
+  });
 });
 
 describe("CrawlerService.fetchPage", () => {
