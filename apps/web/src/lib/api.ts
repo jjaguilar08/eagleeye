@@ -1,8 +1,13 @@
 import type {
   CreatePipelineRunRequest,
+  CreateWhitelistEntryRequest,
+  DraftEmailsResponse,
+  EmailThreadDTO,
   PipelineRunDTO,
   SettingDTO,
+  UpdateEmailDraftRequest,
   UpdateSettingRequest,
+  WhitelistEntryDTO,
 } from "@eagleeye/types";
 
 const API_URL = process.env["NEXT_PUBLIC_API_URL"] ?? "http://localhost:4000";
@@ -68,4 +73,42 @@ export function extractAuthors(id: string): Promise<PipelineRunDTO> {
 
 export function discoverContacts(id: string): Promise<PipelineRunDTO> {
   return apiFetch<PipelineRunDTO>(`/pipeline-runs/${id}/discover-contacts`, { method: "POST" });
+}
+
+export function draftEmails(id: string): Promise<DraftEmailsResponse> {
+  return apiFetch<DraftEmailsResponse>(`/pipeline-runs/${id}/draft-emails`, { method: "POST" });
+}
+
+export function approveEmailThread(id: string): Promise<EmailThreadDTO> {
+  return apiFetch<EmailThreadDTO>(`/email-threads/${id}/approve`, { method: "POST" });
+}
+
+export function rejectEmailThread(id: string): Promise<EmailThreadDTO> {
+  return apiFetch<EmailThreadDTO>(`/email-threads/${id}/reject`, { method: "POST" });
+}
+
+export function updateEmailDraft(
+  id: string,
+  patch: UpdateEmailDraftRequest,
+): Promise<EmailThreadDTO> {
+  return apiFetch<EmailThreadDTO>(`/email-threads/${id}/draft`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
+export function sendEmailThread(id: string): Promise<EmailThreadDTO> {
+  return apiFetch<EmailThreadDTO>(`/email-threads/${id}/send`, { method: "POST" });
+}
+
+export function listWhitelist(): Promise<WhitelistEntryDTO[]> {
+  return apiFetch<WhitelistEntryDTO[]>("/whitelist");
+}
+
+export function addWhitelistEntry(body: CreateWhitelistEntryRequest): Promise<WhitelistEntryDTO> {
+  return apiFetch<WhitelistEntryDTO>("/whitelist", { method: "POST", body: JSON.stringify(body) });
+}
+
+export function removeWhitelistEntry(id: string): Promise<WhitelistEntryDTO> {
+  return apiFetch<WhitelistEntryDTO>(`/whitelist/${id}`, { method: "DELETE" });
 }

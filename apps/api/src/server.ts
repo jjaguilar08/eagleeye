@@ -4,6 +4,8 @@ import cors from "@fastify/cors";
 import { healthRoutes } from "./routes/health.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { pipelineRunRoutes } from "./routes/pipeline-runs.js";
+import { emailThreadRoutes } from "./routes/email-threads.js";
+import { whitelistRoutes } from "./routes/whitelist.js";
 import { startPipelineWorker } from "./lib/pipeline-queue.js";
 
 const app = Fastify({ logger: true });
@@ -16,11 +18,21 @@ startPipelineWorker();
 
 await app.register(cors, {
   origin: process.env["WEB_ORIGIN"] ?? "http://localhost:3000",
+  // @fastify/cors defaults to methods: "GET,HEAD,POST" — PATCH (used by
+  // /settings since Day 3, and by Day 8's /email-threads/:id/draft) was
+  // silently rejected by the browser's preflight the whole time. Only
+  // curl-based verification ever exercised those routes; found live via a
+  // real browser click on Day 8. List every method the API actually uses
+  // rather than reaching for a wildcard — DELETE added for Day 9's
+  // /whitelist/:id, double-checked live per Day 8's own lesson.
+  methods: ["GET", "POST", "PATCH", "DELETE"],
 });
 
 await app.register(healthRoutes);
 await app.register(settingsRoutes);
 await app.register(pipelineRunRoutes);
+await app.register(emailThreadRoutes);
+await app.register(whitelistRoutes);
 
 const port = Number(process.env["PORT"] ?? 4000);
 const host = process.env["HOST"] ?? "0.0.0.0";

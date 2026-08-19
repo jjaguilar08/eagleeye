@@ -206,6 +206,13 @@ model Setting {
   maxDraftsPerRun   Int     @default(10)
   maxSendsPerRun    Int     @default(5)
   dailySendCap      Int     @default(10)
+  // Persona/company fields used by Day 8's AI draft service to generate
+  // outreach emails. Fictionalized stand-in, not the real company this demo
+  // project is based on — see notes.md Day 8.
+  companyName       String  @default("Timberline Outdoor Co.")
+  senderName        String  @default("Alex Morgan")
+  senderRole        String  @default("Partnerships Lead")
+  productPitch      String  @default("outdoor, hunting, and shooting-sports gear")
 }
 
 model WhitelistEntry {

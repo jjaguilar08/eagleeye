@@ -12,6 +12,7 @@
     "test": "prisma generate && vitest run"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.117.1",
     "@eagleeye/types": "workspace:*",
     "@fastify/cors": "^11.3.0",
     "@prisma/client": "^6.3.1",
@@ -20,6 +21,7 @@
     "dotenv": "^16.6.1",
     "fastify": "^5.2.1",
     "ioredis": "^6.0.0",
+    "resend": "^6.20.0",
     "robots-parser": "^3.0.1"
   },
   "devDependencies": {

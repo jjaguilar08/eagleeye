@@ -8,6 +8,8 @@ import {
   runExtractStage,
   runDiscoverStage,
 } from "../services/pipeline-orchestrator.js";
+import { EmailDraftService } from "../services/email-draft.js";
+import { runDraftEmailsStage } from "../services/email-drafter.js";
 
 const contactAttemptSelect = {
   id: true,
@@ -30,6 +32,30 @@ const authorSelect = {
   contactAttempts: { select: contactAttemptSelect, orderBy: { createdAt: "asc" } },
 } as const;
 
+const messageSelect = {
+  id: true,
+  threadId: true,
+  direction: true,
+  aiGenerated: true,
+  approvedByUser: true,
+  body: true,
+  sentAt: true,
+  createdAt: true,
+} as const;
+
+export const emailThreadSelect = {
+  id: true,
+  articleId: true,
+  authorId: true,
+  contactAttemptId: true,
+  recipientEmail: true,
+  subject: true,
+  status: true,
+  createdAt: true,
+  updatedAt: true,
+  messages: { select: messageSelect, orderBy: { createdAt: "asc" } },
+} as const;
+
 // Excludes `rawHtml` from every API response — the dashboard only ever
 // displays status/crawlError/author fields, and there's no reason to ship
 // potentially large HTML blobs over the wire for a value nothing renders.
@@ -47,6 +73,7 @@ const articleSelect = {
   createdAt: true,
   updatedAt: true,
   author: { select: authorSelect },
+  emailThreads: { select: emailThreadSelect, orderBy: { createdAt: "asc" } },
 } as const;
 
 const runSelect = {
@@ -60,7 +87,13 @@ const runSelect = {
   startedAt: true,
   completedAt: true,
   createdAt: true,
-  articles: { select: articleSelect },
+  // Explicit order — otherwise Postgres offers no ordering guarantee absent
+  // ORDER BY, which showed up as real nondeterminism today: rows returned in
+  // a different order across requests once Day 8 added UPDATEs (EmailThread
+  // creation/edits) alongside the pre-existing Article rows. Day 8's
+  // per-thread review UI persists state across reloads, so stable ordering
+  // matters more here than it did for the earlier read-only article list.
+  articles: { select: articleSelect, orderBy: { discoveredAt: "asc" } },
 } as const;
 
 type RunRow = Awaited<ReturnType<typeof findRun>>;
@@ -237,6 +270,45 @@ export async function pipelineRunRoutes(app: FastifyInstance): Promise<void> {
 
       const updated = await findRun(run.id);
       return withError(updated!);
+    },
+  );
+
+  // Same automation gate as .../crawl and .../discover-contacts, for the
+  // same "prevent unattended spend" reasoning — this step calls the
+  // Anthropic API, which costs real money per call.
+  app.post<{ Params: { id: string } }>(
+    "/pipeline-runs/:id/draft-emails",
+    async (request, reply) => {
+      const settings = await prisma.setting.upsert({
+        where: { id: 1 },
+        update: {},
+        create: { id: 1 },
+      });
+
+      if (!settings.automationEnabled) {
+        return reply
+          .code(403)
+          .send({ error: "Automation is disabled. Enable it in Settings before drafting emails." });
+      }
+
+      const run = await findRun(request.params.id);
+
+      if (!run) {
+        return reply.code(404).send({ error: "Pipeline run not found" });
+      }
+
+      const apiKey = process.env["ANTHROPIC_API_KEY"];
+      if (!apiKey) {
+        return reply
+          .code(500)
+          .send({ error: "AI drafting is not configured: missing ANTHROPIC_API_KEY." });
+      }
+
+      const draftService = new EmailDraftService({ apiKey });
+      const batch = await runDraftEmailsStage(run.id, draftService);
+
+      const updated = await findRun(run.id);
+      return reply.code(200).send({ run: withError(updated!), ...batch });
     },
   );
 }

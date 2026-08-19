@@ -13,6 +13,13 @@ export interface SettingDTO {
   maxDraftsPerRun: number;
   maxSendsPerRun: number;
   dailySendCap: number;
+  // Persona/company fields Day 8's AI draft service renders into generated
+  // outreach emails. Fictionalized stand-in company, not the real one this
+  // demo project is based on — see notes.md Day 8.
+  companyName: string;
+  senderName: string;
+  senderRole: string;
+  productPitch: string;
 }
 
 export interface UpdateSettingRequest {
@@ -59,6 +66,63 @@ export interface AuthorDTO {
   contactAttempts: ContactAttemptDTO[];
 }
 
+// --- Email drafting (Day 8) ---
+
+export type EmailThreadStatus = "DRAFT" | "PENDING_APPROVAL" | "SENT" | "REPLIED" | "CLOSED";
+export type MessageDirection = "OUTBOUND" | "INBOUND";
+
+export interface MessageDTO {
+  id: string;
+  threadId: string;
+  direction: MessageDirection;
+  aiGenerated: boolean;
+  approvedByUser: boolean;
+  body: string;
+  sentAt: string | null;
+  createdAt: string;
+}
+
+export interface EmailThreadDTO {
+  id: string;
+  articleId: string;
+  authorId: string;
+  contactAttemptId: string | null;
+  recipientEmail: string;
+  subject: string;
+  status: EmailThreadStatus;
+  createdAt: string;
+  updatedAt: string;
+  // Just the one AI-drafted OUTBOUND message as of Day 8 — INBOUND replies
+  // and multi-message threads are Day 9+ (sending) territory.
+  messages: MessageDTO[];
+}
+
+export interface UpdateEmailDraftRequest {
+  subject: string;
+  body: string;
+}
+
+// One per Article the draft-emails batch attempted (drafted or failed) —
+// articles skipped for already having a thread aren't included here, since
+// they already show up via ArticleDTO.emailThreads.
+export interface DraftEmailBatchItemDTO {
+  articleId: string;
+  outcome: "drafted" | "failed";
+  reason?: string;
+  threadId?: string;
+  inputTokens: number;
+  outputTokens: number;
+  costUsd: number;
+}
+
+export interface DraftEmailsResponse {
+  run: PipelineRunDTO;
+  results: DraftEmailBatchItemDTO[];
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCostUsd: number;
+}
+
 export interface ArticleDTO {
   id: string;
   pipelineRunId: string;
@@ -79,6 +143,10 @@ export interface ArticleDTO {
   // set (status becomes EXTRACTED either way) — even when no author was
   // found, extractionMethod: "NONE" records that the attempt happened.
   author: AuthorDTO | null;
+  // Empty until Day 8's draft-emails has run for this article. In practice
+  // at most one, enforced by the draft-emails route's own idempotency check
+  // — kept as an array to match the schema's actual one-to-many relation.
+  emailThreads: EmailThreadDTO[];
 }
 
 export interface PipelineRunDTO {
@@ -104,4 +172,18 @@ export interface PipelineRunDTO {
 export interface CreatePipelineRunRequest {
   topic: string;
   maxArticles: number;
+}
+
+// --- Whitelist (Day 9) ---
+
+export interface WhitelistEntryDTO {
+  id: string;
+  email: string;
+  label: string | null;
+  createdAt: string;
+}
+
+export interface CreateWhitelistEntryRequest {
+  email: string;
+  label?: string;
 }
