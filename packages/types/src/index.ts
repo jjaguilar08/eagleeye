@@ -92,8 +92,8 @@ export interface EmailThreadDTO {
   status: EmailThreadStatus;
   createdAt: string;
   updatedAt: string;
-  // Just the one AI-drafted OUTBOUND message as of Day 8 — INBOUND replies
-  // and multi-message threads are Day 9+ (sending) territory.
+  // The one AI-drafted OUTBOUND message, plus any INBOUND replies Day 10's
+  // webhook has attached since, ordered chronologically.
   messages: MessageDTO[];
 }
 

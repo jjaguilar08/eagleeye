@@ -6,6 +6,7 @@ import { settingsRoutes } from "./routes/settings.js";
 import { pipelineRunRoutes } from "./routes/pipeline-runs.js";
 import { emailThreadRoutes } from "./routes/email-threads.js";
 import { whitelistRoutes } from "./routes/whitelist.js";
+import { webhookRoutes } from "./routes/webhooks.js";
 import { startPipelineWorker } from "./lib/pipeline-queue.js";
 
 const app = Fastify({ logger: true });
@@ -33,6 +34,7 @@ await app.register(settingsRoutes);
 await app.register(pipelineRunRoutes);
 await app.register(emailThreadRoutes);
 await app.register(whitelistRoutes);
+await app.register(webhookRoutes);
 
 const port = Number(process.env["PORT"] ?? 4000);
 const host = process.env["HOST"] ?? "0.0.0.0";

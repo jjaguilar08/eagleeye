@@ -359,7 +359,9 @@ function EmailThreadCard({
   onReject,
   onSave,
   onSend,
+  onRefresh,
   pending,
+  refreshing,
   error,
   sendBlockReason,
 }: {
@@ -371,12 +373,17 @@ function EmailThreadCard({
   onReject: () => void;
   onSave: (subject: string, body: string) => void;
   onSend: () => void;
+  onRefresh: () => void;
   pending: boolean;
+  refreshing: boolean;
   error: string | undefined;
   sendBlockReason: string | null;
 }) {
   const [editing, setEditing] = useState(false);
-  const message = thread.messages[0];
+  // Edit/approve/send always act on the one OUTBOUND draft, regardless of
+  // how many INBOUND replies have landed since — those are rendered below,
+  // read-only.
+  const message = thread.messages.find((m) => m.direction === "OUTBOUND");
   const [subject, setSubject] = useState(thread.subject);
   const [body, setBody] = useState(message?.body ?? "");
 
@@ -440,11 +447,26 @@ function EmailThreadCard({
           </div>
         </div>
       ) : (
-        <div className="flex flex-col gap-1">
+        <div className="flex flex-col gap-2">
           <div className="text-sm font-medium text-black dark:text-zinc-100">{thread.subject}</div>
-          <div className="whitespace-pre-wrap text-sm text-zinc-700 dark:text-zinc-300">
-            {message?.body}
-          </div>
+          <ul className="flex flex-col gap-2">
+            {thread.messages.map((m) => (
+              <li
+                key={m.id}
+                className={`rounded border px-3 py-2 text-sm ${
+                  m.direction === "OUTBOUND"
+                    ? "ml-6 border-blue-200 bg-blue-50 dark:border-blue-900 dark:bg-blue-950"
+                    : "mr-6 border-green-200 bg-green-50 dark:border-green-900 dark:bg-green-950"
+                }`}
+              >
+                <div className="mb-1 text-xs font-medium text-zinc-500 dark:text-zinc-400">
+                  {m.direction === "OUTBOUND" ? "You" : "Reply"} ·{" "}
+                  {new Date(m.createdAt).toLocaleString()}
+                </div>
+                <div className="whitespace-pre-wrap text-zinc-700 dark:text-zinc-300">{m.body}</div>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
@@ -473,6 +495,17 @@ function EmailThreadCard({
             className="rounded border border-red-300 px-3 py-1 text-sm font-medium text-red-700 hover:bg-red-50 disabled:opacity-50 dark:border-red-800 dark:text-red-300 dark:hover:bg-red-950"
           >
             Reject
+          </button>
+          {/* Manual only — replies can take real-world minutes to days, so
+              continuously polling every thread doesn't make sense the way it
+              does for the Day 7 pipeline-run view. */}
+          <button
+            type="button"
+            onClick={onRefresh}
+            disabled={refreshing}
+            className="rounded border border-zinc-300 px-3 py-1 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-900"
+          >
+            {refreshing ? "Refreshing…" : "Refresh"}
           </button>
         </div>
       )}
@@ -618,6 +651,7 @@ export default function Home() {
   const [draftError, setDraftError] = useState<string | null>(null);
   const [lastDraftBatch, setLastDraftBatch] = useState<DraftEmailsResponse | null>(null);
   const [pendingThreadId, setPendingThreadId] = useState<string | null>(null);
+  const [refreshingThreadId, setRefreshingThreadId] = useState<string | null>(null);
   const [threadErrors, setThreadErrors] = useState<Record<string, string>>({});
   const [whitelist, setWhitelist] = useState<WhitelistEntryDTO[]>([]);
   const [whitelistAdding, setWhitelistAdding] = useState(false);
@@ -858,6 +892,24 @@ export default function Home() {
       }));
     } finally {
       setPendingThreadId(null);
+    }
+  }
+
+  async function handleRefreshThread(threadId: string) {
+    if (!selectedRun) return;
+
+    setRefreshingThreadId(threadId);
+    setThreadErrors((prev) => ({ ...prev, [threadId]: "" }));
+    try {
+      const updated = await getPipelineRun(selectedRun.id);
+      setRuns((prev) => prev.map((run) => (run.id === updated.id ? updated : run)));
+    } catch (error) {
+      setThreadErrors((prev) => ({
+        ...prev,
+        [threadId]: error instanceof Error ? error.message : "Failed to refresh.",
+      }));
+    } finally {
+      setRefreshingThreadId(null);
     }
   }
 
@@ -1282,7 +1334,9 @@ export default function Home() {
                         onReject={() => handleRejectThread(thread.id)}
                         onSave={(subject, body) => handleSaveDraft(thread.id, subject, body)}
                         onSend={() => handleSendThread(thread.id)}
+                        onRefresh={() => handleRefreshThread(thread.id)}
                         pending={pendingThreadId === thread.id}
+                        refreshing={refreshingThreadId === thread.id}
                         error={threadErrors[thread.id] || undefined}
                         sendBlockReason={sendBlockReason}
                       />

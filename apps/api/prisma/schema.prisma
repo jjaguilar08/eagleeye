@@ -192,6 +192,10 @@ model Message {
   body           String           @db.Text
   sentAt         DateTime?
   createdAt      DateTime         @default(now())
+  // Resend's email_id for this message — only ever set on INBOUND messages
+  // created from Day 10's webhook. Unique so the webhook handler can dedupe
+  // retried/replayed deliveries of the same event by a single lookup.
+  providerEmailId String?         @unique
 
   thread EmailThread @relation(fields: [threadId], references: [id], onDelete: Cascade)
 
